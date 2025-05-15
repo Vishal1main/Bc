@@ -1,73 +1,147 @@
 require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
+const cors = require('cors');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-// Health check endpoint - REQUIRED for Render
+// Initialize Telegram Bot
+const bot = new Telegraf(process.env.BOT_TOKEN);
+const CHANNEL_ID = process.env.CHANNEL_ID;
+
+// Cache for movie files
+let movieCache = [];
+let lastCacheUpdate = null;
+
+// Health check endpoint
 app.get('/_health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok',
-    message: 'Telegram Media Backend is running',
-    timestamp: new Date().toISOString()
-  });
+  res.status(200).json({ status: 'healthy' });
 });
 
-// Sample API endpoint
-app.get('/search', async (req, res) => {
+// Fetch all movie files from channel
+async function updateMovieCache() {
   try {
-    const query = req.query.q;
-    if (!query) {
-      return res.status(400).json({ error: 'Search query required' });
+    const messages = await bot.telegram.getChatHistory(CHANNEL_ID, 100);
+    
+    movieCache = messages
+      .filter(msg => {
+        // Check if message contains a media file with "movie" in caption/filename
+        const hasMedia = msg.document || msg.video || msg.photo;
+        const caption = msg.caption || '';
+        const filename = msg.document?.file_name || msg.video?.file_name || '';
+        
+        return hasMedia && (caption.toLowerCase().includes('movie') || 
+                          filename.toLowerCase().includes('movie'));
+      })
+      .map(msg => {
+        let fileType, fileId, fileName;
+        
+        if (msg.document) {
+          fileType = 'document';
+          fileId = msg.document.file_id;
+          fileName = msg.document.file_name;
+        } else if (msg.video) {
+          fileType = 'video';
+          fileId = msg.video.file_id;
+          fileName = msg.video.file_name;
+        } else if (msg.photo) {
+          fileType = 'photo';
+          fileId = msg.photo[msg.photo.length - 1].file_id; // Highest quality
+          fileName = `photo_${msg.message_id}.jpg`;
+        }
+        
+        return {
+          id: msg.message_id,
+          fileId,
+          type: fileType,
+          name: fileName,
+          caption: msg.caption,
+          date: new Date(msg.date * 1000).toISOString()
+        };
+      });
+    
+    lastCacheUpdate = new Date();
+    return true;
+  } catch (error) {
+    console.error('Cache update failed:', error);
+    return false;
+  }
+}
+
+// Search endpoint
+app.get('/api/movies', async (req, res) => {
+  try {
+    const { query } = req.query;
+    
+    // Update cache if older than 1 hour or empty
+    if (!lastCacheUpdate || (new Date() - lastCacheUpdate) > 3600000) {
+      await updateMovieCache();
     }
-
-    // In a real implementation, you would search your Telegram channel here
-    const mockResults = [
-      {
-        id: 'msg_001',
-        name: `${query} Movie Poster.jpg`,
-        type: 'photo',
-        caption: `Official ${query} movie poster`
-      },
-      {
-        id: 'msg_002',
-        name: `${query} Trailer.mp4`,
-        type: 'video',
-        caption: `Official ${query} trailer`
-      }
-    ];
-
-    res.json(mockResults);
+    
+    // Filter movies by search query
+    const results = query 
+      ? movieCache.filter(movie => 
+          movie.name.toLowerCase().includes(query.toLowerCase()) || 
+          (movie.caption && movie.caption.toLowerCase().includes(query.toLowerCase()))
+        )
+      : movieCache;
+    
+    res.json({
+      success: true,
+      data: results,
+      lastUpdated: lastCacheUpdate
+    });
+    
   } catch (error) {
     console.error('Search error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error' 
+    });
   }
 });
 
-// Initialize Telegram Bot (if token exists)
-if (process.env.BOT_TOKEN) {
-  const bot = new Telegraf(process.env.BOT_TOKEN);
-  
-  bot.command('start', (ctx) => {
-    ctx.reply('Welcome to the Media Search Bot!');
-  });
+// Forward movie to user
+app.post('/api/request-movie', async (req, res) => {
+  try {
+    const { movieId, userId } = req.body;
+    
+    if (!movieId || !userId) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Missing movieId or userId' 
+      });
+    }
+    
+    // Forward the message to user
+    await bot.telegram.forwardMessage(
+      userId,
+      CHANNEL_ID,
+      parseInt(movieId)
+    );
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('Forward error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
+  }
+});
 
-  bot.launch();
-  console.log('Telegram bot started');
-} else {
-  console.warn('No BOT_TOKEN provided - Telegram bot disabled');
-}
-
-// Server startup
+// Start server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/_health`);
-});
-
-// Handle shutdown gracefully
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  process.exit(0);
+  bot.launch();
+  console.log('Telegram bot started');
+  
+  // Initial cache update
+  updateMovieCache().then(success => {
+    console.log(success ? 'Cache updated successfully' : 'Cache update failed');
+  });
 });
