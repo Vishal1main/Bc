@@ -1,107 +1,73 @@
+require('dotenv').config();
 const express = require('express');
-const axios = require('axios');
 const { Telegraf } = require('telegraf');
 
 const app = express();
 app.use(express.json());
 
-// Configuration
-const BOT_TOKEN = '7861502352:AAE6J2zWmfHsDmAIv-SQII8nL7aU5sNLJz8';
-const CHANNEL_ID = '-1002145560187'; // or channel ID
-const bot = new Telegraf(BOT_TOKEN);
+// Health check endpoint - REQUIRED for Render
+app.get('/_health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    message: 'Telegram Media Backend is running',
+    timestamp: new Date().toISOString()
+  });
+});
 
-// Cache for search results
-let fileCache = [];
-let lastCacheUpdate = 0;
-
-// Middleware to update cache
-async function updateCache() {
-    try {
-        const messages = await bot.telegram.getChatHistory(CHANNEL_ID, 100);
-        
-        fileCache = messages.map(msg => {
-            if (msg.document) {
-                return {
-                    id: msg.message_id,
-                    name: msg.document.file_name,
-                    type: 'document',
-                    caption: msg.caption
-                };
-            } else if (msg.photo) {
-                return {
-                    id: msg.message_id,
-                    name: `photo_${msg.message_id}.jpg`,
-                    type: 'photo',
-                    caption: msg.caption
-                };
-            } else if (msg.video) {
-                return {
-                    id: msg.message_id,
-                    name: msg.video.file_name || `video_${msg.message_id}.mp4`,
-                    type: 'video',
-                    caption: msg.caption
-                };
-            } else if (msg.audio) {
-                return {
-                    id: msg.message_id,
-                    name: msg.audio.file_name || `audio_${msg.message_id}.mp3`,
-                    type: 'audio',
-                    caption: msg.caption
-                };
-            }
-            return null;
-        }).filter(Boolean);
-        
-        lastCacheUpdate = Date.now();
-    } catch (error) {
-        console.error('Cache update failed:', error);
+// Sample API endpoint
+app.get('/search', async (req, res) => {
+  try {
+    const query = req.query.q;
+    if (!query) {
+      return res.status(400).json({ error: 'Search query required' });
     }
+
+    // In a real implementation, you would search your Telegram channel here
+    const mockResults = [
+      {
+        id: 'msg_001',
+        name: `${query} Movie Poster.jpg`,
+        type: 'photo',
+        caption: `Official ${query} movie poster`
+      },
+      {
+        id: 'msg_002',
+        name: `${query} Trailer.mp4`,
+        type: 'video',
+        caption: `Official ${query} trailer`
+      }
+    ];
+
+    res.json(mockResults);
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Initialize Telegram Bot (if token exists)
+if (process.env.BOT_TOKEN) {
+  const bot = new Telegraf(process.env.BOT_TOKEN);
+  
+  bot.command('start', (ctx) => {
+    ctx.reply('Welcome to the Media Search Bot!');
+  });
+
+  bot.launch();
+  console.log('Telegram bot started');
+} else {
+  console.warn('No BOT_TOKEN provided - Telegram bot disabled');
 }
 
-// Search endpoint
-app.get('/search', async (req, res) => {
-    try {
-        // Update cache if older than 5 minutes
-        if (Date.now() - lastCacheUpdate > 300000) {
-            await updateCache();
-        }
-        
-        const query = req.query.q.toLowerCase();
-        const results = fileCache.filter(file => 
-            file.name.toLowerCase().includes(query) || 
-            (file.caption && file.caption.toLowerCase().includes(query))
-        );
-        
-        res.json(results);
-    } catch (error) {
-        console.error('Search error:', error);
-        res.status(500).json({ error: 'Search failed' });
-    }
-});
-
-// Forward endpoint
-app.post('/forward', async (req, res) => {
-    try {
-        const { fileId, userId } = req.body;
-        
-        // Forward the message to user
-        await bot.telegram.forwardMessage(
-            userId, 
-            CHANNEL_ID, 
-            fileId
-        );
-        
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Forward error:', error);
-        res.status(500).json({ error: 'Forward failed' });
-    }
-});
-
-// Start server
-const PORT = process.env.PORT || 3000;
+// Server startup
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    // Initial cache update
-    updateCache();
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/_health`);
+});
+
+// Handle shutdown gracefully
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  process.exit(0);
 });
